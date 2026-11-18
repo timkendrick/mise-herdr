@@ -5,5 +5,5 @@ PLUGIN = { -- luacheck: ignore
     author = "Tim Kendrick",
     license = "MIT",
     homepage = "https://github.com/timkendrick/mise-herdr",
-    depends = { "herdr" },
+    depends = { "aqua:herdrdev/herdr" },
 }
