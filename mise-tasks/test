@@ -1,42 +1,199 @@
 #!/usr/bin/env bash
-#MISE description="Run backend plugin tests - test plugin linking and basic functionality"
+#MISE description="Install real herdr plugins from GitHub into an isolated mise and herdr setup"
 set -euo pipefail
 
-# Link the plugin for testing
-mise plugin link --force "<BACKEND>" .
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REQUIRED_COMMANDS=(herdr git cargo jq)
 
-# Clear cache to ensure fresh testing
-mise cache clear
+TAGGED_TOOL="herdr:qu8n/herdr-automatic-rename"
+TAGGED_ID="herdr-automatic-rename"
+UNTAGGED_TOOL="herdr:JanTvrdik/herdr-command-palette"
+UNTAGGED_ID="jt.command-palette"
+SUBDIR_TOOL="herdr:ogulcancelik/herdr-plugin-examples/rust-release-check"
+SUBDIR_ID="examples.rust-release-check"
 
-# Test that the plugin can list tools (this should work even if no tools are available)
-echo "Testing plugin linking and basic functionality..."
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [--keep] [--help]
 
-# Try to list available versions for a test tool
-# Note: This will likely fail until you implement the backend methods
-# Replace <TEST_TOOL> with a real tool name your backend supports
-TEST_TOOL="<TEST_TOOL>"
+Links this backend plugin into an isolated mise setup and installs real herdr plugins from GitHub.
+The herdr registry lives in a temporary XDG_CONFIG_HOME, so the real herdr setup is not changed.
 
-echo "Testing version listing for ${TEST_TOOL}..."
-if mise ls-remote "<BACKEND>:${TEST_TOOL}" 2>/dev/null; then
-    echo "✓ Version listing works"
-else
-    echo "⚠ Version listing failed - implement backend_list_versions.lua for your backend"
-fi
+Options:
+  --keep   Keep the temporary directory after the tests finish
+  --help   Show this help
+EOF
+}
 
-# Test installation if versions are available
-echo "Testing installation..."
-if mise install "<BACKEND>:${TEST_TOOL}@latest" 2>/dev/null; then
-    echo "✓ Installation works"
-    
-    # Test that the tool can be executed
-    if mise exec "<BACKEND>:${TEST_TOOL}@latest" -- ${TEST_TOOL} --version 2>/dev/null; then
-        echo "✓ Tool execution works"
-    else
-        echo "⚠ Tool execution failed - check backend_exec_env.lua implementation"
-    fi
-else
-    echo "⚠ Installation failed - implement backend_install.lua for your backend"
-fi
+color() {
+	local code="$1"
+	shift
+	if [[ -n "${NO_COLOR:-}" || ! -t 2 ]]; then
+		printf '%s' "$*"
+	else
+		printf '\033[%sm%s\033[0m' "$code" "$*"
+	fi
+}
 
-echo "✓ Basic plugin structure tests completed"
-echo "Note: Replace <TEST_TOOL> with a real tool and implement the backend methods"
+log() {
+	printf '%s %s\n' "$(color 34 '==>')" "$*" >&2
+}
+
+pass() {
+	printf '%s %s\n' "$(color 32 'ok')" "$*" >&2
+}
+
+fail() {
+	printf '%s %s\n' "$(color 31 'FAIL')" "$*" >&2
+	exit 1
+}
+
+keep=false
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--keep) keep=true ;;
+	--help)
+		usage
+		exit 0
+		;;
+	*)
+		usage >&2
+		exit 1
+		;;
+	esac
+	shift
+done
+
+# Resolve real binaries before isolating mise, because mise shims and command wrappers
+# would look for tools in the isolated data directory.
+tool_path=""
+for command in "${REQUIRED_COMMANDS[@]}"; do
+	resolved="$(mise which "$command" 2>/dev/null || command -v "$command" || true)"
+	[[ -n "$resolved" ]] || fail "required command not found: $command"
+	tool_path="$tool_path$(dirname "$resolved"):"
+done
+export PATH="$tool_path$PATH"
+
+root="$(mktemp -d "${TMPDIR:-/tmp}/mise-herdr-test.XXXXXX")"
+cleanup() {
+	if [[ "$keep" == true ]]; then
+		log "kept $root"
+	else
+		rm -rf "$root"
+	fi
+}
+trap cleanup EXIT
+
+unset HERDR_SOCKET_PATH HERDR_CLIENT_SOCKET_PATH HERDR_SESSION HERDR_BIN_PATH HERDR_ENV \
+	HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID
+export MISE_DATA_DIR="$root/mise-data"
+export MISE_CACHE_DIR="$root/mise-cache"
+export MISE_STATE_DIR="$root/mise-state"
+export MISE_CONFIG_DIR="$root/mise-config"
+export MISE_GLOBAL_CONFIG_FILE="$root/mise-config/config.toml"
+export MISE_YES=1
+export XDG_CONFIG_HOME="$root/xdg-config"
+export XDG_STATE_HOME="$root/xdg-state"
+mkdir -p "$root/work"
+cd "$root/work"
+
+install_dir() {
+	local tool="$1"
+	local version="$2"
+	mise where "$tool@$version"
+}
+
+canonical() {
+	(cd "$1" && pwd -P)
+}
+
+registered_field() {
+	local plugin_id="$1"
+	local field="$2"
+	herdr plugin list --json --plugin "$plugin_id" |
+		jq -r --arg id "$plugin_id" --arg field "$field" '.result.plugins[] | select(.plugin_id == $id) | .[$field]'
+}
+
+assert_registered() {
+	local plugin_id="$1"
+	local expected_root="$2"
+	local expected_enabled="$3"
+	local root_value
+	root_value="$(registered_field "$plugin_id" plugin_root)"
+	[[ "$root_value" == "$expected_root" ]] ||
+		fail "$plugin_id: expected root $expected_root, got '${root_value}'"
+	local enabled_value
+	enabled_value="$(registered_field "$plugin_id" enabled)"
+	[[ "$enabled_value" == "$expected_enabled" ]] ||
+		fail "$plugin_id: expected enabled=$expected_enabled, got '${enabled_value}'"
+}
+
+assert_not_registered() {
+	local plugin_id="$1"
+	[[ -z "$(registered_field "$plugin_id" plugin_id)" ]] || fail "$plugin_id: still registered"
+}
+
+disable_in_registry() {
+	local plugin_id="$1"
+	local registry="$XDG_CONFIG_HOME/herdr/plugins.json"
+	jq --arg id "$plugin_id" 'map(if .plugin_id == $id then .enabled = false else . end)' "$registry" >"$registry.new"
+	mv "$registry.new" "$registry"
+}
+
+log "linking backend plugin from $REPO_DIR"
+mise plugin link --force herdr "$REPO_DIR" >/dev/null
+
+log "listing versions"
+tagged_versions="$(mise ls-remote "$TAGGED_TOOL")"
+grep -qx '0.14.0' <<<"$tagged_versions" || fail "$TAGGED_TOOL: 0.14.0 not listed"
+grep -qx '0.15.0' <<<"$tagged_versions" || fail "$TAGGED_TOOL: 0.15.0 not listed"
+pass "release tags are listed without the v prefix"
+untagged_versions="$(mise ls-remote "$UNTAGGED_TOOL")"
+[[ "$untagged_versions" =~ ^[0-9a-f]{7}$ ]] ||
+	fail "$UNTAGGED_TOOL: expected one abbreviated commit, got '$untagged_versions'"
+pass "an untagged repository lists its default branch commit"
+
+log "installing $TAGGED_TOOL@0.14.0"
+mise install "$TAGGED_TOOL@0.14.0" >/dev/null 2>&1
+old_root="$(canonical "$(install_dir "$TAGGED_TOOL" 0.14.0)")/checkout"
+assert_registered "$TAGGED_ID" "$old_root" true
+pass "install links the checkout into herdr"
+
+log "upgrading a disabled plugin to $TAGGED_TOOL@0.15.0"
+disable_in_registry "$TAGGED_ID"
+mise install "$TAGGED_TOOL@0.15.0" >/dev/null 2>&1
+new_root="$(canonical "$(install_dir "$TAGGED_TOOL" 0.15.0)")/checkout"
+assert_registered "$TAGGED_ID" "$new_root" false
+pass "a newer install relinks the plugin and keeps it disabled"
+
+log "uninstalling the superseded version"
+mise uninstall "$TAGGED_TOOL@0.14.0" >/dev/null 2>&1
+assert_registered "$TAGGED_ID" "$new_root" false
+pass "uninstalling a version that herdr does not use keeps the registration"
+
+log "uninstalling the linked version"
+mise uninstall "$TAGGED_TOOL@0.15.0" >/dev/null 2>&1
+assert_not_registered "$TAGGED_ID"
+pass "uninstalling the linked version unregisters the plugin"
+
+log "replacing a plugin linked from another directory"
+mise install "$UNTAGGED_TOOL@latest" >/dev/null 2>&1
+untagged_install="$(canonical "$(install_dir "$UNTAGGED_TOOL" "$untagged_versions")")"
+foreign_dir="$root/foreign"
+mkdir -p "$foreign_dir"
+cp -R "$untagged_install/checkout/." "$foreign_dir/"
+herdr plugin link "$foreign_dir" >/dev/null
+output="$(mise install --force "$UNTAGGED_TOOL@latest" 2>&1)"
+grep -q "$UNTAGGED_ID was linked from" <<<"$output" || fail "no replacement warning in output: $output"
+assert_registered "$UNTAGGED_ID" "$untagged_install/checkout" true
+pass "an install replaces a foreign registration and warns"
+
+log "installing a subdirectory plugin with a build step"
+mise install "$SUBDIR_TOOL@latest" >/dev/null 2>&1
+subdir_version="$(mise ls-remote "$SUBDIR_TOOL" | tail -n 1)"
+subdir_root="$(canonical "$(install_dir "$SUBDIR_TOOL" "$subdir_version")")/checkout/rust-release-check"
+assert_registered "$SUBDIR_ID" "$subdir_root" true
+[[ -d "$subdir_root/target/release" ]] || fail "$SUBDIR_ID: build output not found"
+pass "a subdirectory plugin is built and linked"
+
+log "all tests passed"
