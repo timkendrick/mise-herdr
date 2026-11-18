@@ -1,340 +1,140 @@
-# mise backend plugin template
+# mise-herdr
 
-This is a GitHub template for building a mise backend plugin using the vfox-style backend architecture.
+A [mise](https://mise.jdx.dev) backend plugin that manages [herdr](https://herdr.dev) plugins declaratively.
 
-## What are Backend Plugins?
+Install herdr plugins in `mise.toml` instead of running `herdr plugin install` by hand:
 
-Backend plugins in mise extend the standard tool plugin system to manage **multiple tools** using the `plugin:tool` format. They're perfect for:
-
-- **Package managers** (npm, pip, cargo, gem)
-- **Tool families** (multiple related tools from one ecosystem) 
-- **Custom installations** that need to manage many tools
-
-Unlike tool plugins that manage one tool, backend plugins can install and manage multiple tools like `npm:prettier`, `npm:eslint`, `cargo:ripgrep`, etc.
-
-## Using this template
-
-### Option 1: Use GitHub's template feature (recommended)
-1. Click "Use this template" button on GitHub
-2. Name your repository (e.g., `mise-mybackend` or `vfox-mybackend`)
-3. Clone your new repository
-4. Follow the setup instructions below
-
-### Option 2: Clone and modify
-```bash
-git clone https://github.com/jdx/mise-backend-plugin-template mise-mybackend
-cd mise-mybackend
-rm -rf .git
-git init
+```toml
+[tools]
+"aqua:herdrdev/herdr" = "latest"
+"herdr:plannotator/herdr-annotate" = "latest"
+"herdr:beyondlex/herdr-recent-navigator" = "0.8.0"
+"herdr:ogulcancelik/herdr-plugin-examples/agent-telegram-notify" = "latest"
 ```
 
-## Setup Instructions
+Plugins are downloaded from GitHub into the mise install directory, built, and linked into herdr with `herdr plugin link`.
 
-### 1. Replace placeholders
+## Install the plugin
 
-Search and replace these placeholders throughout the project:
-- `<BACKEND>` → your backend name (e.g., `npm`, `cargo`, `pip`)
-- `<GITHUB_USER>` → your GitHub username or organization  
-- `<TEST_TOOL>` → a real tool name your backend can install (for testing)
-
-Files to update:
-- `metadata.lua` - Update name, version, description, author, license, homepage, and optional metadata
-- `hooks/*.lua` - Replace placeholders and implement your backend logic
-- `mise-tasks/test` - Update test tool name and commands
-- `README.md` - Update this file with your backend's information
-
-### 2. Implement the backend hooks
-
-Backend plugins require three main hooks:
-
-#### `hooks/backend_list_versions.lua`
-Lists available versions for a tool in your backend.
-
-```lua
-function PLUGIN:BackendListVersions(ctx)
-    local tool = ctx.tool
-    -- local options = ctx.options
-    -- Your logic to fetch versions for the tool
-    -- Return: {versions = {"1.0.0", "1.1.0", "2.0.0"}}
-end
+```sh
+mise plugin install herdr https://github.com/timkendrick/mise-herdr
 ```
 
-**Examples**:
-- **API-based**: Query npm registry, PyPI, crates.io APIs
-- **Command-based**: Run `npm view <tool> versions`, `pip index versions <tool>`
-- **File-based**: Parse registry files or manifests
+Each herdr plugin is then available as `herdr:<owner>/<repo>`. If the plugin is in a subdirectory of the repository, add the subdirectory: `herdr:<owner>/<repo>/<subdir>`. This is the same source format that `herdr plugin install` accepts.
 
-#### `hooks/backend_install.lua` 
-Installs a specific version of a tool.
+### The herdr CLI tool name
 
-```lua
-function PLUGIN:BackendInstall(ctx)
-    local tool = ctx.tool
-    local version = ctx.version  
-    local install_path = ctx.install_path
-    local download_path = ctx.download_path
-    -- local options = ctx.options
-    -- Your logic to install the tool
-    -- Return: {}
-end
+When this plugin is installed as `herdr`, mise reads the bare tool name `herdr` as a reference to the plugin, not to the herdr CLI.
+
+Install the CLI with its full backend name instead:
+
+```toml
+[tools]
+# Before
+herdr = "latest"
+
+# After
+"aqua:herdrdev/herdr" = "latest"
 ```
 
-**Examples**:
-- **Package manager**: `npm install <tool>@<version>`, `pip install <tool>==<version>`
-- **Download & extract**: Download binary/archive and extract to install_path
-- **Build from source**: Clone repository, checkout version, build and install
+The plugin runs the `herdr` CLI to validate and link plugins. If `"aqua:herdrdev/herdr"` is in your config, mise installs it first and puts it on `PATH` for the plugin. Otherwise the plugin uses the `herdr` on your `PATH`.
 
-#### `hooks/backend_exec_env.lua`
-Sets up environment variables for a tool.
+## Versions
 
-```lua
-function PLUGIN:BackendExecEnv(ctx)
-    local install_path = ctx.install_path
-    -- local options = ctx.options
-    -- Your logic to set up environment
-    -- Return: {env_vars = {{key = "PATH", value = install_path .. "/bin"}}}
-end
+The plugin uses the release tags of the GitHub repository as versions. A release tag has the form `vX.Y.Z` or `X.Y.Z`. The plugin removes the `v` prefix.
+
+Some repositories have no release tags. Other repositories have only tags with another form, such as `beta/v0.4.23-beta.1` or `rust-lite-v0.2.4`. For these repositories, the only version is the abbreviated commit hash of the default branch, such as `eab9400`.
+
+| mise version | Installs |
+| --- | --- |
+| `0.8.0` | The tag `v0.8.0` or `0.8.0` |
+| `latest` | The newest release tag, or the current commit of the default branch if the repository has no release tags |
+| `eab9400` | The current commit of the default branch, if it is `eab9400` |
+| `main` or `ref:main` | The current commit of the branch `main` |
+| `v1.0.0-rc.1` | Any tag of the repository, by its full name |
+| `5940b98ed52b8f87404699bda61eb46badd83605` | The commit with this full hash |
+
+`mise ls-remote herdr:<owner>/<repo>` lists the versions, for example:
+
+```sh
+$ mise ls-remote herdr:beyondlex/herdr-recent-navigator
+0.1.0
+0.2.0
+...
+0.8.0
+
+$ mise ls-remote herdr:plannotator/herdr-annotate
+dd147a9
 ```
 
-**Examples**:
-- **Basic**: Add `bin/` directory to PATH
-- **Complex**: Set tool-specific environment variables, library paths
-- **Ecosystem-specific**: Like `node_modules/.bin` for npm, site-packages for Python
+The plugin does not read the `version` field of `herdr-plugin.toml`. This field can be different from the release tags.
 
-### 3. Platform considerations
+## How install works
 
-Your backend may need to handle different operating systems:
+For `"herdr:plannotator/herdr-annotate" = "latest"`, install does these steps:
 
-```lua
--- Available in all hooks via RUNTIME object
-if RUNTIME.osType == "Darwin" then
-    -- macOS-specific logic
-elseif RUNTIME.osType == "Linux" then  
-    -- Linux-specific logic
-elseif RUNTIME.osType == "Windows" then
-    -- Windows-specific logic
-end
+1. List the tags and the default branch commit of `https://github.com/plannotator/herdr-annotate.git` with `git ls-remote`.
+2. Find the git ref for the version. Here the repository has no release tags, so `latest` is the default branch commit.
+3. Fetch only that commit into `checkout/` in the mise install directory, such as `~/.local/share/mise/installs/herdr-plannotator-herdr-annotate/dd147a9/checkout/`. The checkout keeps its `.git` directory.
+4. Validate `herdr-plugin.toml` with herdr. The plugin links the checkout into a temporary herdr configuration, so your herdr configuration does not change. herdr rejects the plugin here if it needs a newer herdr version.
+5. Run the `[[build]]` commands of the manifest that apply to the current platform, in the plugin directory. These are the same commands that `herdr plugin install` runs. If a command fails, install fails.
+6. Link the plugin directory into herdr with `herdr plugin link`. If a herdr server is running, it uses the plugin immediately.
+7. Write `herdr-mise.json` in the install directory. This file records the plugin id and the linked directory for uninstall.
+
+For a plugin in a subdirectory, the plugin fetches the whole repository and links the subdirectory. Build commands can use files outside the subdirectory, as they can with `herdr plugin install`.
+
+The plugin does not add anything to `PATH`. Binaries that a plugin keeps in its own `bin/` directory stay private to herdr.
+
+### Enabled state
+
+`herdr plugin link` enables a plugin by default. If herdr already has the plugin and it is disabled, install links the new version as disabled. Use `herdr plugin enable` and `herdr plugin disable` to change the state.
+
+### Replace an installed plugin
+
+herdr registers one plugin for each plugin id. If herdr already has the plugin from another source, install replaces it and shows a warning such as:
+
+```text
+annotate was installed by herdr (github) at ~/.config/herdr/plugins/github-installations/annotate-4e1d0c6a8b2f/68957-0/checkout; replacing it with plannotator/herdr-annotate@dd147a9
 ```
 
-### 4. Error handling
+To move a plugin from `herdr plugin install` to mise, add it to `mise.toml` and run `mise install`. herdr removes the old installation files later, when no herdr server uses them.
 
-Provide meaningful error messages:
+There is no warning when install replaces another mise install of the same tool, for example during `mise upgrade`.
 
-```lua
-function PLUGIN:BackendListVersions(ctx)
-    local tool = ctx.tool
+## How uninstall works
 
-    if not tool or tool == "" then
-        error("Tool name cannot be empty")
-    end
+`mise uninstall` and `mise prune` unregister the plugin from herdr, but only if herdr still uses the version that mise removes. For example, `mise upgrade` installs and links the new version first. Then it removes the old version, and herdr keeps the new version.
 
-    -- ... your implementation ...
-    
-    if #versions == 0 then
-        error("No versions found for " .. tool)
-    end
-    
-    return {versions = versions}
-end
+Uninstall does not remove the config and state directories of the plugin. `herdr plugin uninstall` also keeps these directories.
+
+## Platforms
+
+The plugin supports macOS and Linux. It needs `git` and the `herdr` CLI. Build commands can need more tools, such as `cargo`, `npm` or `bash`. Windows is not supported.
+
+## Limitations
+
+- **Moving refs:** a branch version such as `main` is fixed when mise installs it. mise does not install it again when the branch changes. To get the new commit, run `mise install --force herdr:<owner>/<repo>@main`.
+- **Abbreviated commit versions:** GitHub fetches commits only by full hash. After the default branch moves, an abbreviated commit version such as `eab9400` cannot be installed again, for example from a lockfile on a new machine. Use `latest` or a full commit hash instead.
+- **No release dates:** versions have no release date. mise shows a warning for each install if [`minimum_release_age`](https://mise.jdx.dev/configuration/settings.html#minimum_release_age) is set, and allows the version.
+- **Changes in herdr:** mise does not detect changes that you make with the herdr CLI. If you run `herdr plugin uninstall`, run `mise install --force herdr:<owner>/<repo>` to link the plugin again.
+- **Updates in herdr:** `herdr plugin update` does not update linked plugins. Use `mise upgrade` instead.
+- **Running plugin commands:** `mise upgrade` removes the files of the old version. A plugin command or pane that still runs from the old version can fail. `herdr plugin update` keeps old files until no herdr server uses them.
+
+## Development
+
+Link your working copy:
+
+```sh
+mise plugin link --force herdr .
 ```
 
-## Development Workflow
+| Task | Description |
+| --- | --- |
+| `mise run test` | Install, upgrade and uninstall real herdr plugins from GitHub in an isolated mise and herdr environment |
+| `mise run lint` | Check formatting, types and GitHub Actions workflows |
+| `mise run ci` | Run all checks |
 
-### Setting up development environment
-
-1. Install pre-commit hooks (optional but recommended):
-```bash
-hk install
-```
-
-This sets up automatic linting and formatting on git commits.
-
-### Local Testing
-
-1. Link your plugin for development:
-```bash
-mise plugin link --force <BACKEND> .
-```
-
-2. Test version listing:
-```bash
-mise ls-remote <BACKEND>:<some-tool>
-```
-
-3. Test installation:
-```bash
-mise install <BACKEND>:<some-tool>@latest
-```
-
-4. Test execution:
-```bash
-mise exec <BACKEND>:<some-tool>@latest -- <some-tool> --version
-```
-
-5. Run tests:
-```bash
-mise run test
-```
-
-6. Run linting:
-```bash
-mise run lint
-```
-
-7. Run full CI suite:
-```bash
-mise run ci
-```
-
-### Code Quality
-
-This template uses [hk](https://hk.jdx.dev) for modern linting and pre-commit hooks:
-
-- **Automatic formatting**: `stylua` formats Lua code
-- **Static analysis**: `luacheck` catches Lua issues  
-- **GitHub Actions linting**: `actionlint` validates workflows
-- **Pre-commit hooks**: Runs all checks automatically on git commit
-
-Manual commands:
-```bash
-hk check      # Run all linters (same as mise run lint)
-hk fix        # Run linters and auto-fix issues
-```
-
-### Debugging
-
-Enable debug output:
-```bash
-mise --debug install <BACKEND>:<tool>@<version>
-```
-
-## Files
-
-- `metadata.lua` – Backend plugin metadata and configuration
-- `hooks/backend_list_versions.lua` – Lists available versions for tools
-- `hooks/backend_install.lua` – Installs specific versions of tools
-- `hooks/backend_exec_env.lua` – Sets up environment variables for tools
-- `.github/workflows/ci.yml` – GitHub Actions CI/CD pipeline
-- `mise.toml` – Development tools and configuration
-- `mise-tasks/` – Task scripts for testing
-- `hk.pkl` – Modern linting and pre-commit hook configuration
-- `.luacheckrc` – Lua linting configuration
-- `stylua.toml` – Lua formatting configuration
-
-## Backend Examples
-
-### Package Manager Backend (npm-style)
-```lua
--- backend_list_versions.lua
-function PLUGIN:BackendListVersions(ctx)
-    local cmd = require("cmd")
-    local json = require("json")
-    local result = cmd.exec("mypm view " .. ctx.tool .. " versions --json")
-    return {versions = json.decode(result)}
-end
-
--- backend_install.lua  
-function PLUGIN:BackendInstall(ctx)
-    local cmd = require("cmd")
-    cmd.exec("mypm install " .. ctx.tool .. "@" .. ctx.version .. " --prefix " .. ctx.install_path)
-    return {}
-end
-
--- backend_exec_env.lua
-function PLUGIN:BackendExecEnv(ctx)
-    return {
-        env_vars = {
-            {key = "PATH", value = ctx.install_path .. "/bin"}
-        }
-    }
-end
-```
-
-### Binary Download Backend (GitHub releases-style)
-```lua
--- backend_list_versions.lua
-function PLUGIN:BackendListVersions(ctx)
-    local http = require("http")
-    local json = require("json")
-    local resp = http.get({url = "https://api.github.com/repos/owner/" .. ctx.tool .. "/releases"})
-    local releases = json.decode(resp.body)
-    local versions = {}
-    for _, release in ipairs(releases) do
-        table.insert(versions, release.tag_name:gsub("^v", ""))
-    end
-    return {versions = versions}
-end
-
--- backend_install.lua
-function PLUGIN:BackendInstall(ctx)
-    local platform = RUNTIME.osType:lower()
-    local arch = RUNTIME.archType
-    local url = "https://github.com/owner/" .. ctx.tool .. "/releases/download/v" .. ctx.version .. 
-                "/" .. ctx.tool .. "-" .. platform .. "-" .. arch .. ".tar.gz"
-    
-    local http = require("http")
-    local file = require("file")
-    local archiver = require("archiver")
-    local temp_file = file.join_path(ctx.download_path, "tool.tar.gz")
-    http.download_file({url = url}, temp_file)
-
-    archiver.decompress(temp_file, ctx.install_path)
-    return {}
-end
-```
-
-## Real-World Examples
-
-- [vfox-npm](https://github.com/jdx/vfox-npm) - Backend for npm packages
-- Study existing mise backends: npm, cargo, pip, gem
-
-## Context Variables Reference
-
-### BackendListVersions Context
-| Variable | Type | Description | Example |
-|----------|------|-------------|---------|
-| `ctx.tool` | string | Tool name | `"prettier"` |
-| `ctx.options` | table | Plugin options from `mise.toml` | `{}` |
-
-### BackendInstall Context
-| Variable | Type | Description | Example |
-|----------|------|-------------|---------|
-| `ctx.tool` | string | Tool name | `"prettier"` |
-| `ctx.version` | string | Tool version | `"3.0.0"` |
-| `ctx.install_path` | string | Installation directory | `"/home/user/.local/share/mise/installs/npm/prettier/3.0.0"` |
-| `ctx.download_path` | string | Download cache directory | `"/home/user/.local/share/mise/downloads/npm/prettier/3.0.0"` |
-| `ctx.options` | table | Plugin options from `mise.toml` | `{}` |
-
-### BackendExecEnv Context
-| Variable | Type | Description | Example |
-|----------|------|-------------|---------|
-| `ctx.tool` | string | Tool name | `"prettier"` |
-| `ctx.version` | string | Tool version | `"3.0.0"` |
-| `ctx.install_path` | string | Installation directory | `"/home/user/.local/share/mise/installs/npm/prettier/3.0.0"` |
-| `ctx.options` | table | Plugin options from `mise.toml` | `{}` |
-
-### Available Lua Modules
-
-Backend plugins have access to these built-in modules:
-
-- `cmd` - Execute shell commands
-- `http` - HTTP client for downloads and API calls  
-- `json` - JSON parsing and encoding
-- `file` - File system operations
-- `archiver` - Archive extraction
-
-## Publishing
-
-1. Ensure all tests pass: `mise run ci`
-2. Create a GitHub repository for your plugin
-3. Push your code
-4. Test with: `mise plugin install mybackend https://github.com/user/mise-mybackend`
-
-## Documentation
-
-- [Backend Plugin Development](https://mise.jdx.dev/backend-plugin-development.html) - Complete guide
-- [Backend Architecture](https://mise.jdx.dev/dev-tools/backend_architecture.html) - How backends work
-- [Lua modules reference](https://mise.jdx.dev/plugin-lua-modules.html) - Available modules
+The test uses a temporary `XDG_CONFIG_HOME`, so it does not change your herdr configuration. It needs network access, `git`, `herdr`, `jq` and `cargo`. Use `mise run test -- --keep` to keep the temporary directory.
 
 ## License
 
